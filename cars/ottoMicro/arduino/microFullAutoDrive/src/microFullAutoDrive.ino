@@ -13,7 +13,16 @@
 #define CMD_THR 2
 #define CMD_TIME 3
 
+#define CENTERED_STEERING_VALUE 1500
+#define CENTERED_THROTTLE_VALUE 1500
 
+#define MINIMUM_STEERING_VALUE 1100
+#define MAXIMUM_STEERING_VALUE 1700
+#define MINIMUM_THROTTLE_VALUE 1250
+#define MAXIMUM_THROTTLE_VALUE 1650
+
+#define THROTTLE_THRESHOLD_TO_SHUTDOWN_AUTO 1600
+    
 enum commandEnumeration{
     NOT_ACTUAL_COMMAND = 0,
     RC_SIGNAL_WAS_LOST = 1,
@@ -52,9 +61,6 @@ int gTotalNumberOfPassesForCommandDisplay = 10000;
 int gCountOfPassesForCommandDisplay = gTotalNumberOfPassesForCommandDisplay;
 
 boolean gWantsLEDon;
-
-unsigned long gCenteredSteeringValue;
-unsigned long gCenteredThrottleValue;
 
 boolean gIsInAutonomousMode;
 int gTheOldRCcommand;
@@ -239,10 +245,7 @@ void setup() {
     
     ServoSTR.attach(PIN_STR);
     ServoTHR.attach(PIN_THR);
-    
-    gCenteredSteeringValue = 1500;
-    gCenteredThrottleValue = 1500;
-    
+        
     initIMU();
     gTheOldRCcommand = NOT_ACTUAL_COMMAND;
     gIsInAutonomousMode = false;     
@@ -350,11 +353,6 @@ void getSerialCommandIfAvailable( commandDataStruct *theDataPtr ){
 }
 
 void handleRCSignals( commandDataStruct *theDataPtr ) {
-    const unsigned long minimumSteeringValue = 1100;
-    const unsigned long maximumSteeringValue = 1700;
-    const unsigned long minimumThrottleValue = 1250;
-    const unsigned long maximumThrottleValue = 1650;
-    const unsigned long throttleThresholdToShutdownAuto = 1600;
     
     unsigned long STR_VAL = pulseRead(RC_INPUT_STR-2); // Read pulse width of
     unsigned long THR_VAL = pulseRead(RC_INPUT_THR); // each channel
@@ -374,7 +372,7 @@ void handleRCSignals( commandDataStruct *theDataPtr ) {
 
     // check for reverse ESC signal from RC while in autonomous mode (user wants to stop auto)    
     if ( gIsInAutonomousMode ) {    
-        if( THR_VAL > throttleThresholdToShutdownAuto ){     // signals increase with reverse throttle movement
+        if( THR_VAL > THROTTLE_THRESHOLD_TO_SHUTDOWN_AUTO ){     // signals increase with reverse throttle movement
 //            if (DEBUG_SERIAL) {
 //                Serial.println("User wants to halt autonomous\n");
 //            }
@@ -390,17 +388,17 @@ void handleRCSignals( commandDataStruct *theDataPtr ) {
 //    Serial.print("\n");
 
     // clip the RC signals to more car appropriate ones
-    if( STR_VAL > maximumSteeringValue )
-        STR_VAL = maximumSteeringValue;
+    if( STR_VAL > MAXIMUM_STEERING_VALUE )
+        STR_VAL = MAXIMUM_STEERING_VALUE;
 
-    else if( STR_VAL < minimumSteeringValue )
-        STR_VAL = minimumSteeringValue;
+    else if( STR_VAL < MINIMUM_STEERING_VALUE )
+        STR_VAL = MINIMUM_STEERING_VALUE;
 
-    if( THR_VAL > maximumThrottleValue )
-        THR_VAL = maximumThrottleValue;
+    if( THR_VAL > MAXIMUM_THROTTLE_VALUE )
+        THR_VAL = MAXIMUM_THROTTLE_VALUE;
 
-    else if( THR_VAL < minimumThrottleValue )
-        THR_VAL = minimumThrottleValue;
+    else if( THR_VAL < MINIMUM_THROTTLE_VALUE )
+        THR_VAL = MINIMUM_THROTTLE_VALUE;
              
     uint8_t Buf[14];
     I2Cread(MPU9250_ADDRESS,0x3B,14,Buf);
@@ -435,6 +433,27 @@ void handleRCSignals( commandDataStruct *theDataPtr ) {
     theDataPtr->command = GOOD_RC_SIGNALS_RECEIVED;
 }
 
+int adjustThrottleForSteering( int steeringValue, int throttleValue ) {
+    long adjustedThrottleValue;
+    int maxBumpValue = 20;
+    
+    if( steeringValue > CENTERED_STEERING_VALUE ) 
+        adjustedThrottleValue = throttleValue + maxBumpValue * ( steeringValue - CENTERED_STEERING_VALUE ) / ( MAXIMUM_STEERING_VALUE - CENTERED_STEERING_VALUE ); 
+    
+    else 
+        adjustedThrottleValue = throttleValue + maxBumpValue * ( CENTERED_STEERING_VALUE - steeringValue ) / ( CENTERED_STEERING_VALUE - MINIMUM_STEERING_VALUE ); 
+
+    // Serial.print("steeringValue:");
+    // Serial.print(steeringValue);
+    // Serial.print("  throttleValue:");
+    // Serial.print(throttleValue);
+    // Serial.print("  adjustedThrottleValue:");
+    // Serial.print(adjustedThrottleValue);
+    // Serial.print("\n");
+
+    return( (int) adjustedThrottleValue );
+}
+
 void loop() {
     
 // ------------------------- Handle RC Commands -------------------------------
@@ -451,8 +470,8 @@ void loop() {
     //       this can be a normal operation in manual driving, so a test for auto mode is made
 
     if(( theCommandData.command == RC_SIGNALED_STOP_AUTONOMOUS ) || ( theCommandData.command == RC_SIGNAL_WAS_LOST )){
-        theCommandData.str = gCenteredSteeringValue;    //  center the steering
-        theCommandData.thr = gCenteredThrottleValue;    //  turn off the motor
+        theCommandData.str = CENTERED_STEERING_VALUE;    //  center the steering
+        theCommandData.thr = CENTERED_THROTTLE_VALUE;    //  turn off the motor
         ServoSTR.writeMicroseconds( theCommandData.str );
         ServoTHR.writeMicroseconds( theCommandData.thr );
 
@@ -473,8 +492,9 @@ void loop() {
        sendSerialCommand( &theCommandData );
        if( gIsInAutonomousMode == false ){	
             //    If not in auto mode, send RC values to servo and ESC
+            int adjustedThrottleValue = adjustThrottleForSteering( theCommandData.str, theCommandData.thr );
             ServoSTR.writeMicroseconds( theCommandData.str );
-            ServoTHR.writeMicroseconds( theCommandData.thr );
+            ServoTHR.writeMicroseconds( adjustedThrottleValue );
         }
     }
     
@@ -485,16 +505,17 @@ void loop() {
 
 // ------------------------- Handle Pi Commands -------------------------------
     getSerialCommandIfAvailable( &theCommandData );
-            
+    int adjustedThrottleValue = adjustThrottleForSteering( theCommandData.str, theCommandData.thr );
+           
     if( theCommandData.command == RUN_AUTONOMOUSLY ){
         ServoSTR.writeMicroseconds( theCommandData.str );
-        ServoTHR.writeMicroseconds( theCommandData.thr );
+        ServoTHR.writeMicroseconds( adjustedThrottleValue );
         gIsInAutonomousMode = true;
     }
     
     else if( theCommandData.command == STOP_AUTONOMOUS ){
-        theCommandData.str = gCenteredSteeringValue;    //  center the steering
-        theCommandData.thr = gCenteredThrottleValue;    //  turn off the motor
+        theCommandData.str = CENTERED_STEERING_VALUE;    //  center the steering
+        theCommandData.thr = CENTERED_THROTTLE_VALUE;    //  turn off the motor
         ServoSTR.writeMicroseconds( theCommandData.str );
         ServoTHR.writeMicroseconds( theCommandData.thr );
         gIsInAutonomousMode = false;
