@@ -1,4 +1,6 @@
 #include <Arduino.h>
+#include "MPU9250.h"
+
 
 
 #include <Servo.h>
@@ -8,10 +10,6 @@
 #define RC_INPUT_STR 0
 #define RC_INPUT_THR 10 
 #define RC_INPUT_COUNT 2
-
-#define CLIP_THR_VAL_MAX 1605
-#define CLIP_THR_VAL_MIN 1305
-
 volatile uint16_t pulseHighTime[RC_INPUT_COUNT];
 volatile uint16_t pulseLowTime[RC_INPUT_COUNT];
 
@@ -23,7 +21,6 @@ unsigned long steer_history[20]; //Array to store 1/5 of a second of steer value
 int steer_next_ind; //index of next value to be written in steer_history
 
 unsigned long thr_zero_val=1498;
-
 
 //volatile bool staleData=0;
 
@@ -206,25 +203,17 @@ void loop()
     unsigned long FILT_STR_VAL=compAvg(steer_history, 20);
 
     ServoSTR.writeMicroseconds(FILT_STR_VAL);
-    unsigned long CLIP_THR_VAL; 
-  /*  if(thr_dif>50){
-      CLIP_THR_VAL = CLIP_T_VAL;
+  
+    unsigned long CLIP_THR_VAL;
+    if(thr_dif>50){
+      CLIP_THR_VAL=1575;
     }else if(thr_dif<-50){
-      CLIP_THR_VAL=1350;
+      CLIP_THR_VAL=1400;
     }else{
       CLIP_THR_VAL=thr_zero_val;
     }
-*/
-  if(THR_VAL > CLIP_THR_VAL_MAX) {
-    CLIP_THR_VAL = CLIP_THR_VAL_MAX;
-  }
-  else if (THR_VAL <  CLIP_THR_VAL_MIN ) {  
-    CLIP_THR_VAL = CLIP_THR_VAL_MIN;
-  } else {
-    CLIP_THR_VAL = THR_VAL;
-  }  
-
     ServoTHR.writeMicroseconds(CLIP_THR_VAL);
+
     printData(0, 0, 0, 0, 0, 0, millis(), FILT_STR_VAL, CLIP_THR_VAL);
 /*
   }else{

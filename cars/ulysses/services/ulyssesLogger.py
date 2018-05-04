@@ -8,45 +8,33 @@ import numpy as np
 import threading
 import keras
 import tensorflow as tf
+import concurrent.futures
 from dropout_model import model
-
-
-LED_names={ "save_to" : 22,
-  "collect_data" : 27,
-  "read_from" : 17,
-  "autonomous" : 4,
-  "shutdown_RPi" : 3,
-  "boot_RPi" : 2,
-}
-
-
-switch_names={ "collect_data" : 6,
-  "read_from" : 5,
-  "autonomous" : 11,
-  "shutdown_RPi" : 9,
-  "boot_RPi" : 10,
-  "save_to": 13 
-}
+from defines import *
 
 time_format='%Y-%m-%d_%H-%M-%S'
 
 logging.basicConfig(filename='ottoLogger.log', level=logging.DEBUG)
 logging.debug('\n\n New Test Session {0}\n'.format(datetime.datetime.now().strftime(time_format)))
 
-SWITCH_ON=GPIO.LOW
-SWITCH_OFF=GPIO.HIGH
+def save_data(imgs, IMUdata, RCcommands, img_file, IMUdata_file, RCcommands_file):
+  start=time.time()
+  np.savez(img_file, imgs)
+  np.savez(IMUdata_file, IMUdata)
+  np.savez(RCcommands_file, RCcommands)
+  end=time.time()
+  print(end-start)
 
-LED_ON=GPIO.HIGH
-LED_OFF=GPIO.LOW
 
 class DataCollector(object):
   '''this object is passed to the camera.start_recording function, which will treat it as a 
       writable object, like a stream or a file'''
   def __init__(self, serial_obj, save_dir):
     assert serial_obj.isOpen()==True
+    self.executor=concurrent.futures.ThreadPoolExecutor(max_workers=5)
     self.save_dir=save_dir
     self.ser=serial_obj
-    self.num_frames=100
+    self.num_frames=200
     self.imgs=np.zeros((self.num_frames, 96, 128, 3), dtype=np.uint8) #we put the images in here
     self.IMUdata=np.zeros((self.num_frames, 7), dtype=np.float32) #we put the imu data in here
     self.RCcommands=np.zeros((self.num_frames, 2), dtype=np.float16) #we put the RC data in here
@@ -61,29 +49,25 @@ class DataCollector(object):
     '''this is the function that is called every time the PiCamera has a new frame'''
     imdata=np.reshape(np.fromstring(s, dtype=np.uint8), (96, 128, 3), 'C')
     #now we read from the serial port and format and save the data:
-    try:
-      start=time.time()
-      self.ser.flushInput()
-      datainput=self.ser.readline()
-      data=list(map(float,str(datainput,'ascii').split(','))) #formats line of data into array
-      while len(data)!=9:
-        datainput=self.ser.readline()
-        data=list(map(float,str(datainput,'ascii').split(','))) #formats line of data into array
-      end=time.time()
-      #print(end-start)
-      print(data)
-      #print("got cereal\n")
 
-    except ValueError as err:
-      print(err)
-      return 
+    self.ser.flushInput()
+    n_read_items=0
+    while n_read_items!=10:
+      try:
+        datainput=self.ser.readline()
+        data=list(map(float, str(datainput, 'ascii').split(',')))
+        n_read_items=len(data)
+      except ValueError:
+        continue
+      print(data)
     #Note: the data from the IMU requires some processing which does not happen here:
     self.imgs[self.idx]=imdata
-    accelData=np.array([data[0], data[1], data[2]], dtype=np.float32)
-    gyroData=np.array([data[3], data[4], data[5]], )
-    datatime=np.array([int(data[6])], dtype=np.float32)
-    steer_command=int(data[7])
-    gas_command=int(data[8])
+    #command=data[0]
+    accelData=np.array([data[1], data[2], data[3]], dtype=np.float32)
+    gyroData=np.array([data[4], data[5], data[6]], )
+    datatime=np.array([int(data[7])], dtype=np.float32)
+    steer_command=int(data[8])
+    gas_command=int(data[9])
     self.IMUdata[self.idx]=np.concatenate((accelData, gyroData, datatime))
     self.RCcommands[self.idx]=np.array([steer_command, gas_command])
     self.idx+=1
@@ -95,13 +79,7 @@ class DataCollector(object):
   
   def flush(self):
     '''this function is called every time the PiCamera stops recording'''
-    start=time.time()
-    np.savez(self.img_file, self.imgs)
-    np.savez(self.IMUdata_file, self.IMUdata)
-    np.savez(self.RCcommands_file, self.RCcommands)
-    end=time.time()
-    print("files saved\n")
-    print(end-start)
+    self.executor.submit(save_data, self.imgs, self.IMUdata, self.RCcommands, self.img_file, self.IMUdata_file, self.RCcommands_file)
     #this new image file name is for the next chunk of data, which starts recording now
     nowtime=datetime.datetime.now()
     self.img_file=self.save_dir+'/imgs_{0}'.format(nowtime.strftime(time_format))
@@ -111,7 +89,6 @@ class DataCollector(object):
     self.IMUdata[:]=0
     self.RCcommands[:]=0
     self.idx=0
-
 
 def imageprocessor(event, serial_obj):
   global g_imagedata
@@ -138,16 +115,14 @@ def imageprocessor(event, serial_obj):
         steer_command=1000
 
       end=time.time()
-      if(end-start)<.2:
-        time.sleep(.2-(end-start))
-      dataline='{0}, {1}, {2}, {3}\n'.format(1, int(steer_command), 1575, 0)
+      print(end-start)
+      dataline='{0}, {1}, {2}, {3}\n'.format(commandEnum.RUN_AUTONOMOUSLY, int(steer_command), THR_MAX, 0)
       print(dataline)
       try:
-        serial_obj.flushInput()
         serial_obj.write(dataline.encode('ascii'))
+        serial_obj.flush()
       except:
         print("some serial problem")
-
 
 class DataGetter(object):
   def __init__(self):
@@ -166,7 +141,6 @@ class DataGetter(object):
 
   def flush(self):
     pass
-
 
 def callback_switch_shutdown_RPi(channel):
   if GPIO.input(switch_names["shutdown_RPi"])!=SWITCH_ON:
@@ -196,18 +170,19 @@ def callback_switch_autonomous(channel):
   else:		#switch off
     if callback_switch_autonomous.is_auto==True:
       logging.debug('\n user toggled autonomous off {0}\n'.format(datetime.datetime.now().strftime(time_format)))
-      g_stop_event.set()
-      g_ip_thread.join()
+      if not g_stop_event.isSet(): #if the event isn't already set, then stop autonomous is triggered by the switch
+        g_stop_event.set() #stop autonomous thread
+      g_ip_thread.join() #join the autonomous thread
       g_camera.stop_recording()
       callback_switch_autonomous.is_auto=False
-      g_stop_event.clear()
       GPIO.output(LED_names["autonomous"], GPIO.LOW)
+      g_stop_event.clear() #clear stop event so we can reenter autonomous
     else:
       logging.debug('read another low transition while not autonomous')
 callback_switch_autonomous.is_auto=False
 
 def callback_switch_collect_data(channel):
-  time.sleep(.2)
+  time.sleep(.1)
   global g_camera
   global g_collector
   if (GPIO.input(switch_names["collect_data"]))==SWITCH_ON:
@@ -228,50 +203,47 @@ def callback_switch_collect_data(channel):
       logging.debug('read another low transition while not data collecting')
 callback_switch_collect_data.is_recording=False
 
-
-def callback_switch_save_to(channel):
-  if GPIO.input(switch_names["save_to"])!=SWITCH_ON:
+def callback_switch_save_to_USBdrive(channel):
+  if GPIO.input(switch_names["save_to_USBdrive"])!=SWITCH_ON:
     return
-  GPIO.output(LED_names["save_to"], LED_ON)
+  GPIO.output(LED_names["save_to_USBdrive"], LED_ON)
   time.sleep(1)
-  GPIO.output(LED_names["save_to"], LED_OFF)
+  GPIO.output(LED_names["save_to_USBdrive"], LED_OFF)
 
-def callback_switch_read_from(channel):
-  if GPIO.input(switch_names["read_from"])!=SWITCH_ON:
+def callback_switch_read_from_USBdrive(channel):
+  if GPIO.input(switch_names["read_from_USBdrive"])!=SWITCH_ON:
     return
-  GPIO.output(LED_names["read_from"], LED_ON)
+  GPIO.output(LED_names["read_from_USBdrive"], LED_ON)
   time.sleep(1)
-  GPIO.output(LED_names["read_from"], LED_OFF)
+  GPIO.output(LED_names["read_from_USBdrive"], LED_OFF)
 
 #code is an int in range 0-63, consisting of binary on-off values for the leds. boot_RPi is MSB
 def displayBinLEDCode(code): 
   GPIO.output(LED_names["boot_RPi"], (code>>5)&1)
   GPIO.output(LED_names["shutdown_RPi"], (code>>4)&1)
   GPIO.output(LED_names["autonomous"], (code>>3)&1)
-  GPIO.output(LED_names["read_from"], (code>>2)&1)
-  GPIO.output(LED_names["collect_data"], (code>>1)&1)
-  GPIO.output(LED_names["save_to"], code&1)
+  GPIO.output(LED_names["collect_data"], (code>>2)&1)
+  GPIO.output(LED_names["save_to_USBdrive"], (code>>1)&1)
+  GPIO.output(LED_names["read_from_USBdrive"], code&1)
 
 def initialize_service():
   #initialize the serial port: if the first port fails, we try the other one
   global g_serial
-  g_serial=0
   try:
     g_serial=serial.Serial('/dev/ttyACM1')
   except serial.SerialException:
     try:
       g_serial=serial.Serial('/dev/ttyACM0')
     except serial.SerialException:
-      print('Cannot connect to serial port')
-
+      logging.debug("error: cannot connect to serial port")
   #initialize the camera
   global g_camera
   g_camera=picamera.PiCamera()
   g_camera.resolution=(128, 96)
-  g_camera.framerate=10
+  g_camera.framerate=FRAME_RATE
   #initialize the data collector object
   global g_collector
-  g_collector=DataCollector(g_serial, "/home/pi/foocars/cars/ulysses/data")
+  g_collector=DataCollector(g_serial, COLLECT_DIR)
   #initialize the image frame to be shared in autonomous mode
   global g_image_data
   g_image_data=np.zeros((36, 128, 3), dtype=np.uint8) 
@@ -287,10 +259,10 @@ def initialize_service():
   global g_graph
   g_graph=tf.get_default_graph()
   #model.load_weights('weights_2018-02-24_14-00-35_epoch_40.h5')
-  model.load_weights('weights_2018-04-05_04-25-09_epoch_16.h5')
+  model.load_weights(WEIGHTS_FILE)
   model._make_predict_function()
   global g_steerstats
-  g_steerstats=np.load('steerstats.npz')['arr_0']
+  g_steerstats=np.load(STEERSTATS_FILE)['arr_0']
   global g_ip_thread
   g_ip_thread=0
 
@@ -312,16 +284,76 @@ for j in range(0, 3):
     time.sleep(.05)
 displayBinLEDCode(0)
 
-
 for switch in switch_names.values():
   GPIO.setup(switch, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
 GPIO.add_event_detect(switch_names["shutdown_RPi"], GPIO.FALLING, callback=callback_switch_shutdown_RPi, bouncetime=50);
 GPIO.add_event_detect(switch_names["autonomous"], GPIO.BOTH, callback=callback_switch_autonomous, bouncetime=200);
 GPIO.add_event_detect(switch_names["collect_data"], GPIO.BOTH, callback=callback_switch_collect_data, bouncetime=50);
-GPIO.add_event_detect(switch_names["save_to"], GPIO.FALLING, callback=callback_switch_save_to, bouncetime=50);
-GPIO.add_event_detect(switch_names["read_from"], GPIO.FALLING, callback=callback_switch_read_from, bouncetime=50);
+GPIO.add_event_detect(switch_names["save_to_USBdrive"], GPIO.FALLING, callback=callback_switch_save_to_USBdrive, bouncetime=50);
+GPIO.add_event_detect(switch_names["read_from_USBdrive"], GPIO.FALLING, callback=callback_switch_read_from_USBdrive, bouncetime=50);
+
+auto_mode=False 
+printcount=0
+while(True):
+  time.sleep(.001)
+  if callback_switch_autonomous.is_auto==True:
+    auto_mode=True
+    printcount=printcount+1
+    #while we are in autonomous mode, we have to poll fubarino for stop signal
+    g_serial.flushInput()
+    n_read_items=0
+    while n_read_items!=10:
+      try:
+        datainput=g_serial.readline()
+        data=list(map(float, str(datainput, 'ascii').split(',')))
+        n_read_items=len(data)
+      except ValueError:
+        continue
+
+    if printcount==10:
+      print(data)
+      printcount=0
+    if data[0]==commandEnum.RC_SIGNALED_STOP_AUTONOMOUS: #if we get a stop signal
+      g_stop_event.set() #stop the autonomous thread
+      for i in range(0, 5): #send ack 5 times
+        time.sleep(.01)
+        dataout='{0}, {1}, {2}, {3}\n'.format(commandEnum.STOPPED_AUTO_COMMAND_RECIEVED, 1500, 1500, 0)
+        g_serial.write(dataout.encode('ascii'))
+      while callback_switch_autonomous.is_auto==True: #blink the led until user turns off the switch
+        time.sleep(.5)
+        GPIO.output(LED_names["autonomous"], GPIO.HIGH)
+        time.sleep(.5)
+        GPIO.output(LED_names["autonomous"], GPIO.LOW)
+      auto_mode=False
+  if auto_mode==True and callback_switch_autonomous.is_auto==False:
+    dataout='{0}, {1}, {2}, {3}\n'.format(commandEnum.STOP_AUTONOMOUS, 1500, 1500, 0)
+    g_serial.write(dataout.encode('ascii'))
+    g_serial.flush()
+    g_serial.flushInput()
+    n_read_items=0
+    while n_read_items!=10:
+      try:
+        datainput=g_serial.readline()
+        data=list(map(float, str(datainput, 'ascii').split(',')))
+        n_read_items=len(data)
+      except ValueError:
+        continue
+    while data[0]!=commandEnum.STOPPED_AUTO_COMMAND_RECIEVED:
+      g_serial.write(dataout.encode('ascii'))
+      g_serial.flush()
+      g_serial.flushInput()
+      n_read_items=0
+      while n_read_items!=10:
+        try:
+          datainput=g_serial.readline()
+          data=list(map(float, str(datainput, 'ascii').split(',')))
+          n_read_items=len(data)
+        except ValueError:
+          continue
+    auto_mode=False
 
 
-input("Press enter to stop")
+    
 GPIO.cleanup()
+g_serial.close()
